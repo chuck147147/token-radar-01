@@ -1,14 +1,29 @@
 # UNMINTED — Token Launch Radar
 
-An offline research dashboard ranking pre-token protocols with a deterministic comparable-token model (`comps-cal-1`).
+An offline research dashboard ranking pre-token protocols with a deterministic comparable-token model (`comps-cal-2`).
 
-The model fits market-cap/TVL medians from positive-cap, positive-TVL traded tokens.
-Category medians with at least five comps are shrunk toward the global median using six global observations.
-Smaller or null categories use the global median.
-TVL is multiplied by that fit, a clipped weekly growth adjustment, and a maturity factor.
+The model selects among 12 pipelines: category median multiples with shrinkage k=6,
+a global power law, and category power laws with parameter shrinkage k=4 or k=12,
+each with no overlay or clipped weekly growth weights of 0.25 or 0.5 plus maturity.
+Calibration uses 128 positive-cap, positive-TVL traded tokens, sorted by slug into
+alternating halves. Every pipeline fits each half and predicts the other; selection
+uses pooled median absolute log10 error, with within-2× share breaking ties within
+0.005 of the best median. The winner, `power-cat-k12+none`, is refit on all calibration comps; production
+uses the category power law without growth or maturity adjustments.
+Unknown ages use the median known age of the fit-half comps during cross-fit and
+of all calibration comps in production. Smaller or null categories use the global fit.
+The dashboard reports the selected formula, candidates, effective multiples at
+$100M TVL, and a log-log scatter plot with the global fit.
+
+The same calibration set selects the winner and reports its pooled cross-fit
+numbers, so those numbers describe the selection procedure and are mildly
+optimistic for the winner. Implied values remain estimates, not predictions.
 Tokenless protocols are screened; the complete watchlist is always retained.
-Explicit value and value/TVL thresholds assign farm, thin, or skip verdicts and six farm steps.
-An alternating-slug holdout test reports dispersion; implied values are estimates, not predictions.
+Verdicts compare implied/TVL with category board peers (whole-board fallback for
+categories with fewer than five rows): farm requires at least $25M implied and
+at least the 75th percentile; thin requires at least $25M, or at least $8M and the
+40th percentile; all others skip. Positions use the board's own distribution with
+no quotas. Each row reports its basis and six farm steps.
 
 Run with Node 22 (TypeScript stripping enabled):
 
