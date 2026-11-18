@@ -6,13 +6,15 @@
 
 An offline research dashboard ranking pre-token protocols with a deterministic comparable-token model (`comps-cal-2`).
 
-The model selects among 12 pipelines: category median multiples with shrinkage k=6,
+**v3.** Re-validation covered a 20-candidate grid. The volatility challenger missed the adoption bar and had higher median error in the five-fold check. Production remains `power-cat-k12+none`. The dashboard adds per-row valuation evidence, nearest traded comps, and the screening funnel. See [the model report](V3-MODEL-REPORT.md) for both cross-fit results.
+
+The original grid evaluated 12 pipelines: category median multiples with shrinkage k=6,
 a global power law, and category power laws with parameter shrinkage k=4 or k=12,
 each with no overlay or clipped weekly growth weights of 0.25 or 0.5 plus maturity.
 Calibration uses 128 positive-cap, positive-TVL traded tokens, sorted by slug into
 alternating halves. Every pipeline fits each half and predicts the other; selection
 uses pooled median absolute log10 error, with within-2× share breaking ties within
-0.005 of the best median. The winner, `power-cat-k12+none`, is refit on all calibration comps; production
+0.005 of the best median. The production model, `power-cat-k12+none`, is refit on all calibration comps; production
 uses the category power law without growth or maturity adjustments.
 Unknown ages use the median known age of the fit-half comps during cross-fit and
 of all calibration comps in production. Smaller or null categories use the global fit.
