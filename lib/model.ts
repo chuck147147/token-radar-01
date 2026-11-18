@@ -81,7 +81,8 @@ function exclusion(p: SnapshotProtocol): keyof Screened['by_reason'] | null {
 }
 export function isRankable(p: SnapshotProtocol): boolean { return isPreToken(p) && exclusion(p) === null; }
 /** Keep unrounded fitted values for calculations; round only the reported multipliers. */
-type Base = 'median' | 'power-global' | 'power-cat-k4' | 'power-cat-k12' | 'power-cat-k8' | 'power-cat-k20' | 'power-cat-k12-trim' | 'power-cat-k12-age';
+type ExplorationBase = `power-cat-k${2 | 6 | 16 | 24 | 32}` | `power-cat-k12-${'fixb' | 'huber' | 'l1' | 'wtvl' | 'min5m' | 'min25m' | 'screen' | 'minn3' | 'minn8' | 'blend50' | 'chg'}`;
+type Base = ExplorationBase | 'median' | 'power-global' | 'power-cat-k4' | 'power-cat-k12' | 'power-cat-k8' | 'power-cat-k20' | 'power-cat-k12-trim' | 'power-cat-k12-age';
 type Overlay = 'none' | 'g25m' | 'g50m' | 'chains05' | 'chains10' | 'vol15' | 'vol30';
 const REF = 1e8;
 function ols(ps: SnapshotProtocol[]) {
@@ -91,33 +92,84 @@ function ols(ps: SnapshotProtocol[]) {
   const b = denominator < 1e-12 ? 1 : xs.reduce((sum,v,i) => sum+(v-x)*(ys[i]!-y),0)/denominator;
   return { a: y-b*x, b, denominator };
 }
+/** Centered weighted least squares, using the same degenerate-slope convention as OLS. */
+function weightedOls(ps: SnapshotProtocol[], weights: number[]) {
+  const xs = ps.map(p => Math.log10(p.tvl_usd)), ys = ps.map(p => Math.log10(p.mcap_usd!));
+  const total = weights.reduce((a,b) => a+b,0);
+  const x = xs.reduce((s,v,i) => s+weights[i]!*v,0)/total;
+  const y = ys.reduce((s,v,i) => s+weights[i]!*v,0)/total;
+  const denominator = xs.reduce((s,v,i) => s+weights[i]!*(v-x)**2,0);
+  const b = denominator < 1e-12 ? 1 : xs.reduce((s,v,i) => s+weights[i]!*(v-x)*(ys[i]!-y),0)/denominator;
+  return { a: y-b*x, b, denominator };
+}
+type FitNote = (note: string) => void;
+function robust(ps: SnapshotProtocol[], huber: boolean, note?: FitNote) {
+  const initial = ols(ps);
+  let current = initial;
+  for (let i=0;i<30;i++) {
+    const residuals = ps.map(p => Math.log10(p.mcap_usd!)-current.a-current.b*Math.log10(p.tvl_usd));
+    let weights: number[];
+    if (huber) {
+      const center = median(residuals), sigma = 1.4826*median(residuals.map(r => Math.abs(r-center)));
+      if (sigma < 1e-12) { note?.('Huber sigma < 1e-12: OLS fallback'); return initial; }
+      const delta = 1.345*sigma;
+      weights = residuals.map(r => Math.abs(r) <= delta ? 1 : delta/Math.abs(r));
+    } else weights = residuals.map(r => 1/Math.max(Math.abs(r),1e-6));
+    current = weightedOls(ps,weights);
+    if (current.denominator < 1e-12) note?.('Weighted denominator < 1e-12: slope 1');
+  }
+  return current;
+}
+const changeZ = (p: SnapshotProtocol): number => Math.max(-50,Math.min(50,p.change_7d ?? 0))/50;
+function trainingFor(protocols: SnapshotProtocol[], form: Base): SnapshotProtocol[] {
+  if (form === 'power-cat-k12-min5m') return protocols.filter(p => p.tvl_usd >= 5e6);
+  if (form === 'power-cat-k12-min25m') return protocols.filter(p => p.tvl_usd >= 25e6);
+  if (form === 'power-cat-k12-screen') {
+    const center = median(protocols.map(p => Math.log10(p.mcap_usd!/p.tvl_usd)));
+    return protocols.filter(p => Math.abs(Math.log10(p.mcap_usd!/p.tvl_usd)-center) <= 1);
+  }
+  return protocols;
+}
 /** One residual-based trimming pass; MAD is centered at the residual median. */
-function trimmed(ps: SnapshotProtocol[]) {
+function trimmed(ps: SnapshotProtocol[], note?: FitNote) {
   const initial = ols(ps);
   const residuals = ps.map(p => Math.log10(p.mcap_usd!)-initial.a-initial.b*Math.log10(p.tvl_usd));
   const center = median(residuals), mad = median(residuals.map(r => Math.abs(r-center)));
   const survivors = ps.filter((_,i) => Math.abs(residuals[i]!) <= 2.5*mad);
-  if (survivors.length < 2) return initial;
+  if (survivors.length < 2) { note?.('Trim survivors < 2: OLS fallback'); return initial; }
   const next = ols(survivors);
+  if (next.denominator < 1e-12) note?.('Trim denominator < 1e-12: OLS fallback');
   return next.denominator >= 1e-12 ? next : initial;
 }
-function ageFit(ps: SnapshotProtocol[], asOf: string, defaultAge: number, fallbackD = 0) {
+function ageFit(ps: SnapshotProtocol[], asOf: string, defaultAge: number, fallbackD = 0, change = false, note?: FitNote) {
   const xs = ps.map(p => Math.log10(p.tvl_usd));
-  const zs = ps.map(p => Math.log10(1+(ageDays(asOf,p.listed_at) ?? defaultAge)/365));
+  const zs = ps.map(p => change ? changeZ(p) : Math.log10(1+(ageDays(asOf,p.listed_at) ?? defaultAge)/365));
   const ys = ps.map(p => Math.log10(p.mcap_usd!));
   const mean = (v: number[]) => v.reduce((a,b) => a+b,0)/v.length;
   const x = mean(xs), z = mean(zs), y = mean(ys);
   const cov = (u: number[], v: number[], um: number, vm: number) => u.reduce((s,t,i) => s+(t-um)*(v[i]!-vm),0);
   const xx = cov(xs,xs,x,x), zz = cov(zs,zs,z,z), xz = cov(xs,zs,x,z);
   const xy = cov(xs,ys,x,y), zy = cov(zs,ys,z,y), det = xx*zz-xz*xz;
+  if (det <= 1e-12) note?.('Covariate determinant <= 1e-12: inherited coefficient');
   const d = det > 1e-12 ? (zy*xx-xy*xz)/det : fallbackD;
   const b = xx >= 1e-12 ? (xy-d*xz)/xx : 1;
   return { a: y-b*x-d*z, b, d, denominator: xx };
 }
-function fit(protocols: SnapshotProtocol[], form: Base, asOf: string) {
+function fit(protocols: SnapshotProtocol[], form: Base, asOf: string, note?: FitNote) {
+  protocols = trainingFor(protocols,form);
+  if (!protocols.length) throw new SnapshotError(`No training observations for ${form}`);
   const defaultAge = defaultAgeFor(protocols,asOf), age = form === 'power-cat-k12-age';
-  const regression = (ps: SnapshotProtocol[], fallbackD = 0) => age ? ageFit(ps,asOf,defaultAge,fallbackD) : { ...(form === 'power-cat-k12-trim' ? trimmed(ps) : ols(ps)), d: 0 };
+  const change = form === 'power-cat-k12-chg', covariate = age || change;
+  const minN = form === 'power-cat-k12-minn3' ? 3 : form === 'power-cat-k12-minn8' ? 8 : 5;
+  const regression = (ps: SnapshotProtocol[], fallbackD = 0, scope = 'Global') => {
+    const scopedNote: FitNote = message => note?.(`${scope}: ${message}`);
+    return covariate ? ageFit(ps,asOf,defaultAge,fallbackD,change,scopedNote) : {
+    ...(form === 'power-cat-k12-trim' ? trimmed(ps,scopedNote) :
+      form === 'power-cat-k12-huber' || form === 'power-cat-k12-l1' ? robust(ps,form === 'power-cat-k12-huber',scopedNote) :
+      form === 'power-cat-k12-wtvl' ? weightedOls(ps,ps.map(p => Math.sqrt(p.tvl_usd))) : ols(ps)), d: 0 };
+  };
   const g = regression(protocols), gm = median(protocols.map(p => p.mcap_usd!/p.tvl_usd));
+  if (g.denominator < 1e-12) note?.('Global denominator < 1e-12: slope 1');
   const groups = new Map<string, SnapshotProtocol[]>();
   for (const p of protocols) if (p.category !== null) groups.set(p.category, [...(groups.get(p.category) ?? []),p]);
   const categories: CategoryFit[] = [], local = new Set<string>();
@@ -127,15 +179,18 @@ function fit(protocols: SnapshotProtocol[], form: Base, asOf: string) {
     if (form === 'median') {
       if (n >= 5) { multiple = (n*median(ps.map(p => p.mcap_usd!/p.tvl_usd))+6*gm)/(n+6); local.add(category); }
     } else {
-      if (form !== 'power-global' && n >= 5) {
-        const c = regression(ps,g.d), k = Number(form.match(/k(\d+)/)![1]);
+      if (form !== 'power-global' && n >= minN) {
+        const c = form === 'power-cat-k12-fixb' ? {
+          a: ps.reduce((sum,p) => sum+(Math.log10(p.mcap_usd!)-g.b*Math.log10(p.tvl_usd)),0)/n,
+          b: g.b, d: 0, denominator: Infinity,
+        } : regression(ps,g.d,`Category ${category}`), k = Number(form.match(/k(\d+)/)![1]);
         if (c.denominator >= 1e-12) {
-          a = (n*c.a+k*g.a)/(n+k); b = (n*c.b+k*g.b)/(n+k); d = (n*c.d+k*g.d)/(n+k); local.add(category);
-        }
+          a = (n*c.a+k*g.a)/(n+k); b = form === 'power-cat-k12-fixb' ? g.b : (n*c.b+k*g.b)/(n+k); d = (n*c.d+k*g.d)/(n+k); local.add(category);
+        } else note?.(`Category ${category}: degenerate TVL, global fallback`);
       }
       multiple = 10**a * REF**(b-1);
     }
-    categories.push({ category,n,multiple,a: form === 'median' ? null : a,b: form === 'median' ? null : b, ...(age ? {d} : {}) });
+    categories.push({ category,n,multiple,a: form === 'median' ? null : a,b: form === 'median' ? null : b, ...(covariate ? {d} : {}) });
   }
   const global = form === 'median' ? gm : 10**g.a * REF**(g.b-1);
   const lookup = new Map(categories.map(c => [c.category,c]));
@@ -144,11 +199,14 @@ function fit(protocols: SnapshotProtocol[], form: Base, asOf: string) {
       const c = p.category === null ? undefined : lookup.get(p.category);
       return { category_n: p.category === null ? protocols.filter(q => q.category === null).length : c?.n ?? 0,
         global: p.category === null || !local.has(p.category), a: form === 'median' ? null : c?.a ?? g.a,
-        b: form === 'median' ? null : c?.b ?? g.b, ...(age ? {d: c?.d ?? g.d} : {}) };
+        b: form === 'median' ? null : c?.b ?? g.b, ...(covariate ? {d: c?.d ?? g.d} : {}) };
     },
     predict: (p: SnapshotProtocol) => {
       const c = p.category === null ? undefined : lookup.get(p.category);
       const value = form === 'median' ? p.tvl_usd*(c?.multiple ?? gm) : 10**(c?.a ?? g.a)*p.tvl_usd**(c?.b ?? g.b);
+      if (form === 'power-cat-k12-blend50' && p.category !== null && local.has(p.category))
+        return Math.sqrt(value*(10**g.a*p.tvl_usd**g.b));
+      if (change) return value * 10**((c?.d ?? g.d)*changeZ(p));
       return age ? value * 10**((c?.d ?? g.d)*Math.log10(1+(ageDays(asOf,p.listed_at) ?? defaultAge)/365)) : value;
     } };
 }
@@ -174,20 +232,63 @@ function adjustment(p: SnapshotProtocol, asOf: string, defaultAge: number, name:
   if (name === 'vol15' || name === 'vol30') o.growthMult = 1-(name === 'vol15' ? 0.15 : 0.30)*Math.abs(o.growth)/50;
   return o;
 }
-function crossFit(calibration: SnapshotProtocol[], asOf: string, folds: number): Candidate[] {
-  return grid.map(candidate => {
-    const errors: number[] = [];
-    for (let i=0;i<folds;i++) {
-      const train = calibration.filter((_,j) => j%folds !== i), fitted = fit(train,candidate.base,asOf);
-      const defaultAge = defaultAgeFor(train,asOf);
-      for (const p of calibration.filter((_,j) => j%folds === i)) {
-        const o = adjustment(p,asOf,defaultAge,candidate.overlay);
-        errors.push(Math.abs(Math.log10(fitted.predict(p)*o.growthMult*o.maturity/p.mcap_usd!)));
+interface PlainDefinition { id: string; base: Base; overlay: Overlay }
+interface EnsembleDefinition { id: string; components: string[] }
+type Definition = PlainDefinition | EnsembleDefinition;
+const exploration: Definition[] = [...grid];
+for (const base of [
+  'power-cat-k2','power-cat-k6','power-cat-k16','power-cat-k24','power-cat-k32',
+  'power-cat-k12-fixb','power-cat-k12-huber','power-cat-k12-l1','power-cat-k12-wtvl',
+  'power-cat-k12-min5m','power-cat-k12-min25m','power-cat-k12-screen',
+  'power-cat-k12-minn3','power-cat-k12-minn8','power-cat-k12-blend50','power-cat-k12-chg',
+] as ExplorationBase[]) exploration.push({id: base+'+none',base,overlay: 'none'});
+exploration.push(
+  {id: 'ens-med3+none', components: ['power-cat-k8+none','power-cat-k12+none','power-cat-k12+vol30']},
+  {id: 'ens-med5+none', components: ['power-cat-k4+none','power-cat-k8+none','power-cat-k12+none','power-cat-k20+none','power-cat-k12-trim+none']},
+  {id: 'ens-top3+none', components: ['power-cat-k12+vol30','power-cat-k12+vol15','power-cat-k12+none']},
+);
+interface FoldDiagnostic { folds: number; fold: number; base: Base; training_n: number; survivors: number; notes: string[] }
+function crossFit(calibration: SnapshotProtocol[], asOf: string, folds: number, candidates: Definition[] = grid, diagnostics?: FoldDiagnostic[]): Candidate[] {
+  const errors = new Map(candidates.map(c => [c.id, [] as number[]]));
+  for (let i=0;i<folds;i++) {
+    const train = calibration.filter((_,j) => j%folds !== i), validation = calibration.filter((_,j) => j%folds === i);
+    const defaultAge = defaultAgeFor(train,asOf), predictions = new Map<string, number[]>();
+    const fits = new Map<Base, ReturnType<typeof fit>>();
+    for (const candidate of candidates) {
+      if ('components' in candidate) continue;
+      let fitted = fits.get(candidate.base);
+      if (!fitted) {
+        const notes: string[] = [];
+        fitted = fit(train,candidate.base,asOf,note => notes.push(note));
+        fits.set(candidate.base,fitted);
+        diagnostics?.push({folds,fold: i,base: candidate.base,training_n: train.length,survivors: trainingFor(train,candidate.base).length,notes});
       }
+      predictions.set(candidate.id,validation.map(p => {
+        const o = adjustment(p,asOf,defaultAge,candidate.overlay);
+        return fitted.predict(p)*o.growthMult*o.maturity;
+      }));
     }
-    return {id: candidate.id, median_abs_log10_error: median(errors), within_2x_share: errors.filter(e => e <= Math.log10(2)).length/errors.length};
+    for (const candidate of candidates) {
+      const values = 'components' in candidate ? validation.map((_,j) => median(candidate.components.map(id => {
+        const component = predictions.get(id);
+        if (!component) throw new SnapshotError(`Missing ensemble component ${id}`);
+        return component[j]!;
+      }))) : predictions.get(candidate.id)!;
+      values.forEach((value,j) => errors.get(candidate.id)!.push(Math.abs(Math.log10(value/validation[j]!.mcap_usd!))));
+    }
+  }
+  return candidates.map(candidate => {
+    const es = errors.get(candidate.id)!;
+    return {id: candidate.id, median_abs_log10_error: median(es), within_2x_share: es.filter(e => e <= Math.log10(2)).length/es.length};
   }).sort((a,b) => a.median_abs_log10_error-b.median_abs_log10_error || compare(a.id,b.id));
 }
+/** Exploration cannot enter production selection. Diagnostics are optional and local to this call. */
+export function evaluateExploration(snapshot: Snapshot, diagnostics?: FoldDiagnostic[]) {
+  const calibration = calibrationFor(snapshot);
+  return { twoWay: crossFit(calibration,snapshot.as_of,2,exploration,diagnostics).map(reported),
+    fiveFold: crossFit(calibration,snapshot.as_of,5,exploration,diagnostics).map(reported) };
+}
+
 function best(candidates: Candidate[]): Candidate {
   const min = Math.min(...candidates.map(c => c.median_abs_log10_error));
   return candidates.filter(c => c.median_abs_log10_error <= min+0.005).sort((a,b) => b.within_2x_share-a.within_2x_share || a.median_abs_log10_error-b.median_abs_log10_error || compare(a.id,b.id))[0]!;
