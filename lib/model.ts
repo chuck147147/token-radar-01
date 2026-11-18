@@ -23,18 +23,11 @@ export interface BoardRow extends SnapshotProtocol {
   verdict_basis: { ratio: number; category_median_ratio: number; ratio_percentile: number; reference_n: number };
   farm_steps: string[];
 }
-interface CalibrationComp {
-  name: string; tvl_usd: number; mcap_usd: number; mcap_tvl_ratio: number;
-}
-type RadarBoardFields = Pick<BoardRow, 'rank' | 'slug' | 'name' | 'category' | 'chains' |
+export type RadarRow = Pick<BoardRow, 'rank' | 'slug' | 'name' | 'category' | 'chains' |
   'tvl_usd' | 'change_7d' | 'listed_at' | 'age_days' | 'implied_value_usd' | 'watchlist' | 'verdict' | 'farm_steps'> &
   { base_multiple: number; growth_multiplier: number; maturity_multiplier: number; ratio_percentile: number; category_median_ratio: number; reference_n: number };
-export type RadarRow = RadarBoardFields & {
-  nearest_comps: CalibrationComp[];
-  valuation_fit: { category_n: number; global: boolean; a: number | null; b: number | null; d?: number };
-};
 export type LiveRow = Pick<SnapshotProtocol, 'slug' | 'name' | 'category' | 'chains' | 'tvl_usd' | 'mcap_usd' | 'change_7d'>;
-interface CategoryFit { category: string; n: number; multiple: number; a: number | null; b: number | null; d?: number }
+interface CategoryFit { category: string; n: number; multiple: number; a: number | null; b: number | null }
 interface Candidate { id: string; median_abs_log10_error: number; within_2x_share: number }
 interface OOS { folds: number; n_fit: number; n_validation: number; median_abs_log10_error: number; within_2x_share: number }
 interface Screened {
@@ -48,8 +41,8 @@ export interface RadarData {
   rows: RadarRow[]; live: LiveRow[];
   methodology: {
     model_version: string; calibration_n: number; calibration_excluded_nonpositive: number; global_multiple: number; categories: CategoryFit[];
-    form: string; form_label: string; formula_text: string; global_a: number | null; global_b: number | null; global_d?: number;
-    ref_tvl_usd: number; candidates: Candidate[]; winner_id: string; selected_id: string; selection_note: string;
+    form: string; form_label: string; formula_text: string; global_a: number | null; global_b: number | null;
+    ref_tvl_usd: number; candidates: Candidate[]; selected_id: string; selection_note: string;
     scatter: { points: number[][]; line: { x1: number; y1: number; x2: number; y2: number } };
     global_fallback: string; calibration_policy: string; oos: OOS; growth_clip_pct: number; growth_weight: number;
     maturity_floor: number; maturity_days: number; default_age_days: number;
@@ -85,167 +78,73 @@ function exclusion(p: SnapshotProtocol): keyof Screened['by_reason'] | null {
 }
 export function isRankable(p: SnapshotProtocol): boolean { return isPreToken(p) && exclusion(p) === null; }
 /** Keep unrounded fitted values for calculations; round only the reported multipliers. */
-interface Base {
-  id: string;
-  shrinkage?: number;
-  method?: 'trim' | 'age';
-}
-interface Overlay {
-  id: string;
-  growthWeight?: number;
-  chainWeight?: number;
-  volatilityWeight?: number;
-}
-interface ModelSpec { base: Base; overlay: Overlay }
+type Base = 'median' | 'power-global' | 'power-cat-k4' | 'power-cat-k12';
 const REF = 1e8;
-const MIN_VARIANCE = 1e-12;
-const V2_ID = 'power-cat-k12+none';
-const none = { id: 'none' };
-const categoryK12 = { id: 'power-cat-k12', shrinkage: 12 };
-const grid: ModelSpec[] = [
-  ...[{ id: 'median' }, { id: 'power-global' }, { id: 'power-cat-k4', shrinkage: 4 }, categoryK12]
-    .flatMap(base => [none, { id: 'g25m', growthWeight: 0.25 }, { id: 'g50m', growthWeight: 0.5 }]
-      .map(overlay => ({ base, overlay }))),
-  ...[
-    { id: 'power-cat-k8', shrinkage: 8 },
-    { id: 'power-cat-k20', shrinkage: 20 },
-    { id: 'power-cat-k12-trim', shrinkage: 12, method: 'trim' as const },
-    { id: 'power-cat-k12-age', shrinkage: 12, method: 'age' as const },
-  ].map(base => ({ base, overlay: none })),
-  ...[
-    { id: 'chains05', chainWeight: 0.05 }, { id: 'chains10', chainWeight: 0.10 },
-    { id: 'vol15', volatilityWeight: 0.15 }, { id: 'vol30', volatilityWeight: 0.30 },
-  ].map(overlay => ({ base: categoryK12, overlay })),
-];
-const candidateId = ({ base, overlay }: ModelSpec) => base.id + '+' + overlay.id;
+function ols(ps: SnapshotProtocol[]) {
+  const xs = ps.map(p => Math.log10(p.tvl_usd)), ys = ps.map(p => Math.log10(p.mcap_usd!));
+  const x = xs.reduce((a,b) => a+b,0)/ps.length, y = ys.reduce((a,b) => a+b,0)/ps.length;
+  const denominator = xs.reduce((sum,v) => sum+(v-x)**2,0);
+  const b = denominator < 1e-12 ? 1 : xs.reduce((sum,v,i) => sum+(v-x)*(ys[i]!-y),0)/denominator;
+  return { a: y-b*x, b, denominator };
+}
+function fit(protocols: SnapshotProtocol[], form: Base) {
+  const g = ols(protocols), gm = median(protocols.map(p => p.mcap_usd!/p.tvl_usd));
+  const groups = new Map<string, SnapshotProtocol[]>();
+  for (const p of protocols) if (p.category !== null) groups.set(p.category, [...(groups.get(p.category) ?? []),p]);
+  const categories: CategoryFit[] = [];
+  for (const category of [...groups.keys()].sort(compare)) {
+    const ps = groups.get(category)!, n = ps.length;
+    let a = g.a, b = g.b, multiple = gm;
+    if (form === 'median') {
+      if (n >= 5) multiple = (n*median(ps.map(p => p.mcap_usd!/p.tvl_usd))+6*gm)/(n+6);
+    } else {
+      if (form !== 'power-global' && n >= 5) {
+        const c = ols(ps), k = form === 'power-cat-k4' ? 4 : 12;
+        if (c.denominator >= 1e-12) { a = (n*c.a+k*g.a)/(n+k); b = (n*c.b+k*g.b)/(n+k); }
+      }
+      multiple = 10**a * REF**(b-1);
+    }
+    categories.push({ category,n,multiple,a: form === 'median' ? null : a,b: form === 'median' ? null : b });
+  }
+  const global = form === 'median' ? gm : 10**g.a * REF**(g.b-1);
+  const lookup = new Map(categories.map(c => [c.category,c]));
+  return { global, a: form === 'median' ? null : g.a, b: form === 'median' ? null : g.b, categories,
+    predict: (p: SnapshotProtocol) => {
+      const c = p.category === null ? undefined : lookup.get(p.category);
+      return form === 'median' ? p.tvl_usd*(c?.multiple ?? gm) : 10**(c?.a ?? g.a)*p.tvl_usd**(c?.b ?? g.b);
+    } };
+}
 function defaultAgeFor(ps: SnapshotProtocol[], asOf: string): number {
   const ages = ps.map(p => ageDays(asOf,p.listed_at)).filter((a): a is number => a !== null);
   return ages.length ? median(ages) : 0;
 }
-const ageFeature = (days: number) => Math.log10(1 + days/365);
-interface Observation { x: number; y: number; z: number }
-function ols(points: Observation[], useAge: boolean, fallbackD = 0) {
-  const mean = (key: keyof Observation) => points.reduce((sum, p) => sum + p[key], 0)/points.length;
-  const x = mean('x'), y = mean('y'), z = mean('z');
-  const xx = points.reduce((sum, p) => sum + (p.x-x)**2, 0);
-  const xy = points.reduce((sum, p) => sum + (p.x-x)*(p.y-y), 0);
-  const xz = useAge ? points.reduce((sum, p) => sum + (p.x-x)*(p.z-z), 0) : 0;
-  let d = fallbackD;
-  if (useAge && xx >= MIN_VARIANCE) {
-    const zz = points.reduce((sum, p) => sum + (p.z-z)**2, 0);
-    const yz = points.reduce((sum, p) => sum + (p.y-y)*(p.z-z), 0);
-    const ageVariance = zz - xz*xz/xx;
-    if (ageVariance >= Math.max(MIN_VARIANCE, zz*1e-8)) d = (yz - xz*xy/xx)/ageVariance;
-  }
-  const b = xx < MIN_VARIANCE ? 1 : (xy - d*xz)/xx;
-  return { a: y-b*x-d*z, b, d, denominator: xx };
-}
-function regression(points: Observation[], method: Base['method'], fallbackD = 0) {
-  const initial = ols(points, method === 'age', fallbackD);
-  if (method !== 'trim') return initial;
-  const residuals = points.map(p => p.y - (initial.a + initial.b*p.x));
-  const center = median(residuals);
-  const cutoff = 2.5*median(residuals.map(r => Math.abs(r-center)));
-  const retained = points.filter((_, i) => Math.abs(residuals[i]!) <= cutoff);
-  if (retained.length < 2) return initial;
-  const trimmed = ols(retained, false);
-  return trimmed.denominator >= MIN_VARIANCE ? trimmed : initial;
-}
-function fit(protocols: SnapshotProtocol[], base: Base, asOf: string) {
-  const useAge = base.method === 'age';
-  const isMedian = base.id === 'median';
-  const defaultAge = defaultAgeFor(protocols, asOf);
-  const age = (p: SnapshotProtocol) => useAge ? ageFeature(ageDays(asOf,p.listed_at) ?? defaultAge) : 0;
-  const observations = (ps: SnapshotProtocol[]) => ps.map(p => ({ x: Math.log10(p.tvl_usd), y: Math.log10(p.mcap_usd!), z: age(p) }));
-  const g = regression(observations(protocols), base.method);
-  const gm = median(protocols.map(p => p.mcap_usd!/p.tvl_usd));
-  const groups = new Map<string, SnapshotProtocol[]>();
-  for (const p of protocols) if (p.category !== null) groups.set(p.category, [...(groups.get(p.category) ?? []), p]);
-  const referenceAge = useAge ? ageFeature(defaultAge) : 0;
-  const referenceMultiple = (a: number, b: number, d: number) => 10**(a+d*referenceAge) * REF**(b-1);
-  const categories: CategoryFit[] = [];
-  for (const category of [...groups.keys()].sort(compare)) {
-    const ps = groups.get(category)!, n = ps.length;
-    let { a, b, d } = g;
-    let multiple = gm;
-    if (isMedian) {
-      if (n >= 5) multiple = (n*median(ps.map(p => p.mcap_usd!/p.tvl_usd))+6*gm)/(n+6);
-    } else {
-      const k = base.shrinkage;
-      if (k !== undefined && n >= 5) {
-        const c = regression(observations(ps), base.method, g.d);
-        if (c.denominator >= MIN_VARIANCE) {
-          a = (n*c.a+k*g.a)/(n+k);
-          b = (n*c.b+k*g.b)/(n+k);
-          d = (n*c.d+k*g.d)/(n+k);
-        }
-      }
-      multiple = referenceMultiple(a,b,d);
-    }
-    categories.push({ category, n, multiple, a: isMedian ? null : a, b: isMedian ? null : b, ...(useAge ? { d } : {}) });
-  }
-  const lookup = new Map(categories.map(c => [c.category,c]));
-  return { global: isMedian ? gm : referenceMultiple(g.a,g.b,g.d), a: isMedian ? null : g.a,
-    b: isMedian ? null : g.b, d: useAge ? g.d : undefined, referenceAge, categories, defaultAge,
-    predict: (p: SnapshotProtocol) => {
-      const c = p.category === null ? undefined : lookup.get(p.category);
-      if (isMedian) return p.tvl_usd*(c?.multiple ?? gm);
-      return 10**((c?.a ?? g.a)+(c?.d ?? g.d)*age(p))*p.tvl_usd**(c?.b ?? g.b);
-    } };
-}
-function adjustments(p: SnapshotProtocol, asOf: string, defaultAge: number, overlay: Overlay) {
+function overlay(p: SnapshotProtocol, asOf: string, defaultAge: number, weight: number, enabled: boolean) {
   const growth = Math.max(-50,Math.min(50,p.change_7d ?? 0));
-  const growthMult = 1+growth/100*(overlay.growthWeight ?? 0);
-  const maturity = overlay.growthWeight === undefined ? 1 : 0.7+0.3*Math.min(ageDays(asOf,p.listed_at) ?? defaultAge,1460)/1460;
-  const chainMult = 1+(overlay.chainWeight ?? 0)*Math.log2(Math.max(1,p.chains.length));
-  const volatilityMult = 1-(overlay.volatilityWeight ?? 0)*Math.abs(growth)/50;
-  return { growth, growthMult, maturity, evidence: chainMult*volatilityMult };
-}
-function crossFit(calibration: SnapshotProtocol[], asOf: string, spec: ModelSpec, folds: number): Candidate {
-  const errors: number[] = [];
-  for (let fold = 0; fold < folds; fold++) {
-    const train = calibration.filter((_, i) => i%folds !== fold);
-    const fitted = fit(train,spec.base,asOf);
-    for (const p of calibration.filter((_, i) => i%folds === fold)) {
-      const o = adjustments(p,asOf,fitted.defaultAge,spec.overlay);
-      errors.push(Math.abs(Math.log10(fitted.predict(p)*o.evidence*o.growthMult*o.maturity/p.mcap_usd!)));
-    }
-  }
-  return { id: candidateId(spec), median_abs_log10_error: median(errors),
-    within_2x_share: errors.filter(e => e <= Math.log10(2)).length/errors.length };
-}
-function compareByError(a: Candidate, b: Candidate) {
-  return a.median_abs_log10_error-b.median_abs_log10_error || compare(a.id,b.id);
-}
-function bestCandidate(sorted: Candidate[]) {
-  return sorted.filter(c => c.median_abs_log10_error <= sorted[0]!.median_abs_log10_error+0.005)
-    .sort((a,b) => b.within_2x_share-a.within_2x_share || compareByError(a,b))[0]!;
+  return { growth, growthMult: 1+growth/100*weight,
+    maturity: enabled ? 0.7+0.3*Math.min(ageDays(asOf,p.listed_at) ?? defaultAge,1460)/1460 : 1 };
 }
 function select(calibration: SnapshotProtocol[], asOf: string) {
-  const candidates = grid.map(spec => crossFit(calibration,asOf,spec,2)).sort(compareByError);
-  const winner = bestCandidate(candidates);
-  const improvesMedian = winner.median_abs_log10_error <= 0.5245 - 0.010;
-  const improvesShare = winner.within_2x_share >= 0.305 + 0.02 && winner.median_abs_log10_error <= 0.5245 + 0.002;
-  const adopted = winner.id !== V2_ID && (improvesMedian || improvesShare);
-  const selected = adopted ? winner : candidates.find(c => c.id === V2_ID)!;
-  return { candidates, winner, selected, adopted, improvesMedian, improvesShare,
-    spec: grid.find(spec => candidateId(spec) === selected.id)! };
-}
-function calibrationFor(snapshot: Snapshot) {
-  return snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0)
-    .sort((a,b) => compare(a.slug,b.slug));
-}
-export function evaluateCandidates(snapshot: Snapshot) {
-  const calibration = calibrationFor(snapshot);
-  const selection = select(calibration,snapshot.as_of);
-  const remaining = [...selection.candidates];
-  const topThree = Array.from({ length: 3 }, () => {
-    const candidate = bestCandidate(remaining);
-    remaining.splice(remaining.indexOf(candidate),1);
-    return candidate.id;
-  });
-  const fiveFold = grid.map(spec => crossFit(calibration,snapshot.as_of,spec,5));
-  return { ...selection, topThree, fiveFold };
+  const halves = [calibration.filter((_,i) => i%2 === 0),calibration.filter((_,i) => i%2 === 1)];
+  const candidates: Candidate[] = [];
+  for (const base of ['median','power-global','power-cat-k4','power-cat-k12'] as Base[]) {
+    for (const [name,weight] of [['none',0],['g25m',0.25],['g50m',0.5]] as const) {
+      const errors: number[] = [];
+      for (let i=0;i<2;i++) {
+        const train = halves[i]!, fitted = fit(train,base), defaultAge = defaultAgeFor(train,asOf);
+        for (const p of halves[1-i]!) {
+          const o = overlay(p,asOf,defaultAge,weight,name !== 'none');
+          errors.push(Math.abs(Math.log10(fitted.predict(p)*o.growthMult*o.maturity/p.mcap_usd!)));
+        }
+      }
+      candidates.push({ id: base+'+'+name, median_abs_log10_error: median(errors), within_2x_share: errors.filter(e => e<=Math.log10(2)).length/errors.length });
+    }
+  }
+  candidates.sort((a,b) => a.median_abs_log10_error-b.median_abs_log10_error || compare(a.id,b.id));
+  const tied = candidates.filter(c => c.median_abs_log10_error <= candidates[0]!.median_abs_log10_error+0.005);
+  tied.sort((a,b) => b.within_2x_share-a.within_2x_share || a.median_abs_log10_error-b.median_abs_log10_error || compare(a.id,b.id));
+  const winner = tied[0]!, [base,name] = winner.id.split('+');
+  return { winner, base: base as Base, weight: name === 'g50m' ? 0.5 : name === 'g25m' ? 0.25 : 0, enabled: name !== 'none',
+    candidates: candidates.map(c => ({...c, median_abs_log10_error: round4(c.median_abs_log10_error),within_2x_share: round4(c.within_2x_share)})) };
 }
 /** Category actions describe a small position; the snapshot alone cannot establish reward eligibility. */
 function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
@@ -287,7 +186,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
     .map(p => ({ slug: p.slug, name: p.name, category: p.category, chains: p.chains,
       tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, change_7d: p.change_7d }));
 }
-export function radarRow(r: BoardRow): RadarBoardFields {
+export function radarRow(r: BoardRow): RadarRow {
   return { rank: r.rank, slug: r.slug, name: r.name, category: r.category, chains: r.chains,
     tvl_usd: r.tvl_usd, change_7d: r.change_7d, listed_at: r.listed_at, age_days: r.age_days,
     implied_value_usd: r.implied_value_usd, base_multiple: r.model.base_multiple,
@@ -296,28 +195,12 @@ export function radarRow(r: BoardRow): RadarBoardFields {
     watchlist: r.watchlist, verdict: r.verdict, farm_steps: r.farm_steps };
 }
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
-  const calibration = calibrationFor(snapshot);
+  const calibration = snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0).sort((a,b) => compare(a.slug,b.slug));
   const selection = select(calibration,snapshot.as_of);
-  const { base: baseSpec, overlay } = selection.spec;
-  const fitted = fit(calibration,baseSpec,snapshot.as_of);
-  const modelVersion = selection.adopted ? 'comps-cal-3' : MODEL_VERSION;
+  const fitted = fit(calibration,selection.base);
+  const modelVersion = selection.winner.id === 'median+g50m' ? 'comps-cal-1' : MODEL_VERSION;
   const tokenless = snapshot.protocols.filter(isPreToken);
-  const { defaultAge } = fitted;
-  const weight = overlay.growthWeight ?? 0;
-  const baseLabel = baseSpec.id === 'median' ? 'Category median multiples shrunk toward the global median'
-    : baseSpec.id === 'power-global' ? 'A global power-law fit of market cap on TVL'
-    : 'Category power-law fits shrunk toward the global fit';
-  const fitLabel = baseSpec.method === 'trim' ? ', with one-step trimmed OLS'
-    : baseSpec.method === 'age' ? ', with listing age as a covariate' : '';
-  const adjustmentLabel = overlay.growthWeight !== undefined ? ', with growth and maturity adjustments'
-    : overlay.chainWeight !== undefined ? ', with a chain-count adjustment'
-    : overlay.volatilityWeight !== undefined ? ', with a weekly volatility adjustment' : '';
-  const ageTerm = fitted.d === undefined ? '' : ` + ${round4(fitted.d)} x log10(1 + ageDays/365)`;
-  const baseFormula = fitted.a === null ? `TVL x category median multiple (shrinkage k=6 toward global ${round4(fitted.global)})`
-    : `10^(${round4(fitted.a)}${ageTerm}) x TVL^${round4(fitted.b!)} (${baseSpec.shrinkage === undefined ? 'global parameters' : `category params shrunk k=${baseSpec.shrinkage} toward global`})`;
-  const adjustmentFormula = overlay.growthWeight !== undefined ? ` x (1 + clip(change_7d, -50, +50)/100 x ${weight}) x (0.7 + 0.3 x min(ageDays, 1460)/1460)`
-    : overlay.chainWeight !== undefined ? ` x (1 + ${overlay.chainWeight} x log2(max(1, chain count)))`
-    : overlay.volatilityWeight !== undefined ? ` x (1 - ${overlay.volatilityWeight} x min(abs(change_7d), 50)/50)` : ' x 1 x 1';
+  const defaultAge = defaultAgeFor(calibration,snapshot.as_of);
   const watch = new Set(snapshot.watchlist);
   const screened: Screened = { tokenless_total: tokenless.length, excluded_total: 0,
     by_reason: { category: 0, versioned: 0, wrapped_or_staked_name: 0, exchange_prefix: 0 }, board_size: 0 };
@@ -328,12 +211,10 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     if (reason) { screened.excluded_total++; screened.by_reason[reason]++; return false; }
     return true;
   });
-  const valuationInputs = new Map<string, Pick<RadarRow, 'base_multiple' | 'growth_multiplier' | 'maturity_multiplier'>>();
   const board: BoardRow[] = chosen.map(p => {
     const age = ageDays(snapshot.as_of, p.listed_at);
-    const { growth, growthMult, maturity, evidence } = adjustments(p,snapshot.as_of,defaultAge,overlay);
-    const base = fitted.predict(p)*evidence/p.tvl_usd;
-    valuationInputs.set(p.slug, { base_multiple: base, growth_multiplier: growthMult, maturity_multiplier: maturity });
+    const base = fitted.predict(p)/p.tvl_usd;
+    const {growth, growthMult, maturity} = overlay(p,snapshot.as_of,defaultAge,selection.weight,selection.enabled);
     const implied = Math.max(1, Math.round(p.tvl_usd * base * growthMult * maturity));
     const verdict: Verdict = 'skip';
     return { ...p, rank: 0, token_status: 'pre-token', age_days: age, implied_value_usd: implied,
@@ -353,47 +234,28 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
   screened.board_size = board.length;
   const live = liveRows(snapshot);
   const early = board.filter(r => !r.watchlist).length;
-  const categoryFits = new Map(fitted.categories.map(c => [c.category, c]));
-  const rows: RadarRow[] = board.map(r => {
-    const fit = r.category === null ? undefined : categoryFits.get(r.category);
-    const categoryN = fit?.n ?? 0;
-    const useGlobalPool = categoryN < 5;
-    const pool = useGlobalPool ? calibration : calibration.filter(p => p.category === r.category);
-    const logTvl = Math.log10(r.tvl_usd);
-    const nearest = pool.map(p => ({ p, distance: Math.abs(Math.log10(p.tvl_usd) - logTvl) }));
-    nearest.sort((a, b) => a.distance - b.distance || compare(a.p.slug, b.p.slug));
-    const nearest_comps = nearest.slice(0, 3).map(({ p }) => ({
-      name: p.name, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd!, mcap_tvl_ratio: p.mcap_usd! / p.tvl_usd,
-    }));
-    return { ...radarRow(r), ...valuationInputs.get(r.slug)!, nearest_comps, valuation_fit: {
-      category_n: categoryN,
-      global: useGlobalPool || (baseSpec.id !== 'median' && fit?.a === fitted.a && fit?.b === fitted.b && fit?.d === fitted.d),
-      a: fit?.a ?? fitted.a, b: fit?.b ?? fitted.b, d: fit?.d ?? fitted.d,
-    } };
-  });
   return { board, radar: {
     as_of: snapshot.as_of, source: snapshot.source, floor_usd: snapshot.floor_usd,
-    model: { ...MODEL, growth_weight: weight }, model_version: modelVersion, watchlist_size: watch.size, board_size: board.length,
-    early_size: early, live_size: live.length, rows, live,
+    model: { ...MODEL, growth_weight: selection.weight }, model_version: modelVersion, watchlist_size: watch.size, board_size: board.length,
+    early_size: early, live_size: live.length, rows: board.map(radarRow), live,
     methodology: { model_version: modelVersion, calibration_n: calibration.length,
       calibration_excluded_nonpositive: snapshot.protocols.filter(p => p.mcap_usd !== null && p.mcap_usd <= 0).length,
-      form: selection.selected.id, winner_id: selection.winner.id, selected_id: selection.selected.id,
-      form_label: `${baseLabel}${fitLabel}${adjustmentLabel}.`,
-      formula_text: `implied = ${baseFormula}${adjustmentFormula}`,
+      form: selection.winner.id, selected_id: selection.winner.id,
+      form_label: `${selection.base === 'median' ? 'Category median multiples shrunk toward the global median' : selection.base === 'power-global' ? 'A global power-law fit of market cap on TVL' : 'Category power-law fits shrunk toward the global fit'}${selection.enabled ? ', with growth and maturity adjustments.' : ', without growth or maturity adjustments.'}`,
+      formula_text: `implied = ${selection.base === 'median' ? `TVL x category median multiple (shrinkage k=6 toward global ${round4(fitted.global)})` : `10^(${round4(fitted.a!)}) x TVL^${round4(fitted.b!)} (${selection.base === 'power-global' ? 'global parameters' : `category params shrunk k=${selection.base === 'power-cat-k4' ? 4 : 12} toward global`})`}${selection.enabled ? ` x (1 + clip(change_7d, -50, +50)/100 x ${selection.weight}) x (0.7 + 0.3 x min(ageDays, 1460)/1460)` : ' x 1 x 1'}`,
       global_a: fitted.a === null ? null : round4(fitted.a), global_b: fitted.b === null ? null : round4(fitted.b),
-      ...(fitted.d === undefined ? {} : { global_d: round4(fitted.d) }),
       ref_tvl_usd: REF, global_multiple: round4(fitted.global), categories: fitted.categories
-        .sort((a,b) => b.n-a.n || compare(a.category,b.category)).map(c => ({...c,multiple: round4(c.multiple),a: c.a === null ? null : round4(c.a),b: c.b === null ? null : round4(c.b), ...(c.d === undefined ? {} : { d: round4(c.d) }) })),
-      candidates: selection.candidates.map(c => ({...c, median_abs_log10_error: round4(c.median_abs_log10_error),within_2x_share: round4(c.within_2x_share)})),
-      selection_note: `Two-way cross-fit compared ${selection.candidates.length} candidates. Pooled OOS numbers are mildly optimistic for the grid winner, ${selection.winner.id}. The production model, ${selection.selected.id}, was refit on all ${calibration.length} comps after applying the adoption rule.`,
+        .sort((a,b) => b.n-a.n || compare(a.category,b.category)).map(c => ({...c,multiple: round4(c.multiple),a: c.a === null ? null : round4(c.a),b: c.b === null ? null : round4(c.b)})),
+      candidates: selection.candidates,
+      selection_note: 'The winner was selected by two-way cross-fit on this same calibration set. These pooled OOS numbers describe the selection procedure and are mildly optimistic for the winner; final parameters were refit on all 128 comps.',
       scatter: { points: calibration.map(p => [Math.log10(p.tvl_usd),Math.log10(p.mcap_usd!)].map(v => Math.round(v*1000)/1000)),
         line: (() => { const xs = calibration.map(p => Math.log10(p.tvl_usd)), x1 = Math.min(...xs), x2 = Math.max(...xs);
-          const y = (x: number) => fitted.a === null ? x+Math.log10(fitted.global) : fitted.a+fitted.b!*x+(fitted.d ?? 0)*fitted.referenceAge;
+          const y = (x: number) => fitted.a === null ? x+Math.log10(fitted.global) : fitted.a+fitted.b!*x;
           return { x1: round4(x1),y1: round4(y(x1)),x2: round4(x2),y2: round4(y(x2)) }; })() },
       global_fallback: 'Null categories and categories with fewer than 5 calibration members use the global fit.',
       calibration_policy: 'Calibration requires recorded market cap > 0 and TVL > 0; nonpositive recorded market caps are excluded.',
-      oos: { folds: 2, n_fit: Math.floor(calibration.length/2), n_validation: calibration.length, median_abs_log10_error: round4(selection.selected.median_abs_log10_error),within_2x_share: round4(selection.selected.within_2x_share) },
-      growth_clip_pct: 50, growth_weight: weight,
+      oos: { folds: 2, n_fit: Math.floor(calibration.length/2), n_validation: calibration.length, median_abs_log10_error: round4(selection.winner.median_abs_log10_error),within_2x_share: round4(selection.winner.within_2x_share) },
+      growth_clip_pct: 50, growth_weight: selection.weight,
       maturity_floor: MODEL.maturity_floor, maturity_days: 1460, default_age_days: defaultAge,
       screened, watchlist_size: watch.size, early_size: early },
   } };
