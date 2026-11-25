@@ -358,8 +358,11 @@ const FARM_GAS: Record<string, number> = {
 function farmSteps(row: BoardRow, defaultAge: number, categoryReference: boolean): string[] {
   const chain = row.chains[0] ?? 'its primary chain';
   const capital = row.tvl_usd >= 5e9 ? 250 : row.tvl_usd >= 1e9 ? 150 : row.tvl_usd >= 1e8 ? 100 : 50;
+  const tranche1 = Math.ceil(capital / 2);
+  const tranche2 = capital - tranche1;
   const age = row.age_days ?? defaultAge;
   const hold = age < 180 ? 60 : age < 365 ? 45 : 30;
+  const reviewDay = Math.floor(hold / 2);
   const weeks = Math.ceil(hold / 7);
   const gas = Object.hasOwn(FARM_GAS, chain) ? FARM_GAS[chain]! : 2;
   const prepGas = gas, entryGas = 2*gas, weeklyGas = 2*gas, exitGas = 3*gas;
@@ -375,11 +378,11 @@ function farmSteps(row: BoardRow, defaultAge: number, categoryReference: boolean
   const step = (action: string, cost: string, time: string) => `${action}. Cost: ${cost}. Time: ${time}.`;
   return [
     step(`Prepare a dedicated wallet for ${row.name}; verify its official app and ${chain} network. Fund ${usd(costs)} in native gas for the whole plan at an estimated ${usd(gas)}/action; this reserve includes later steps`, `${usd(prepGas)} gas for 1 funding action; reserve is not an extra fee`, `${prepMinutes} minutes`),
-    step(`${play.entry}. Confirm these category features in the official UI before signing; limit approvals to the amount used`, `$${capital} committed capital + ${usd(entryGas)} gas allowance for 2 entry/approval actions; product fees extra`, `${entryMinutes} minutes`),
+    step(`${play.entry}. Confirm these category features in the official UI before signing; limit approvals to the amount used. Deploy on a two-tranche schedule: $${tranche1} at entry, the remaining $${tranche2} held back for the day-${reviewDay} review`, `$${tranche1} committed now (tranche 1 of 2; $${tranche2} held back for the day-${reviewDay} review) + ${usd(entryGas)} gas allowance for 2 entry/approval actions; product fees extra`, `${entryMinutes} minutes`),
     step(`For ${row.name}, alternate weekly: odd weeks ${play.first}; even weeks ${play.second}. Use only UI-supported actions, recycle existing capital and skip unavailable features; read-only checks need no gas`, `up to ${usd(weeklyGas)} gas/week for 2 actions (${usd(weeklyGas*weeks)} across ${weeks} weeks); no new capital`, `${weeklyMinutes} minutes/week for ${weeks} weeks within ${hold} days`),
-    step(`Maintain ${row.name}: ${play.maintain}. At day ${Math.floor(hold/2)} of the ${hold}-day hold, ${trend}`, `$${capital} remains at risk; $0 gas for review; opportunity cost varies`, `${reviewMinutes} minutes hands-on; ${hold} days elapsed hold`),
+    step(`Maintain ${row.name}: ${play.maintain}. At day ${reviewDay} of the ${hold}-day hold, ${trend}. Capital schedule decision: add the held-back $${tranche2} only if the TVL and liquidity checks above pass; otherwise run out the plan on the $${tranche1} already committed`, `$${tranche1} at risk before this review ($${capital} once tranche 2 is added); $0 gas for review; opportunity cost varies`, `${reviewMinutes} minutes hands-on; ${hold} days elapsed hold`),
     step(`Rewards unconfirmed: check ${row.name}'s official eligibility, chain and cutoff terms; never assume an airdrop. Save tx hashes, dates, amounts and fees. At exit, ${play.exit}; record final proceeds`, `${usd(exitGas)} gas allowance for 3 exit/claim/revoke actions; reading terms is free; product fees extra`, `${exitMinutes} minutes hands-on; queues may extend settlement`),
-    step(`Net verdict: ${row.verdict.toUpperCase()} — implied $${row.implied_value_usd}; ${row.verdict_basis.ratio.toFixed(2)}x TVL; category median ${row.verdict_basis.category_median_ratio.toFixed(2)}x; percentile ${row.verdict_basis.ratio_percentile.toFixed(2)} among ${row.verdict_basis.reference_n} ${categoryReference ? (row.category ?? 'Uncategorized') : 'whole-board'} board peers${categoryReference ? '' : ' (category under 5)'}; farm: >= $25M and percentile >= 0.75; thin: >= $25M or >= $8M and percentile >= 0.40; else skip; rewards unconfirmed`, `plan totals: ${usd(costs)} estimated gas; $${capital} capital at risk; product fees/losses extra`, `${minutes} minutes total hands-on; ${hold}-day hold`),
+    step(`Net verdict: ${row.verdict.toUpperCase()} — implied $${row.implied_value_usd}; ${row.verdict_basis.ratio.toFixed(2)}x TVL; category median ${row.verdict_basis.category_median_ratio.toFixed(2)}x; percentile ${row.verdict_basis.ratio_percentile.toFixed(2)} among ${row.verdict_basis.reference_n} ${categoryReference ? (row.category ?? 'Uncategorized') : 'whole-board'} board peers${categoryReference ? '' : ' (category under 5)'}; farm: >= $25M and percentile >= 0.75; thin: >= $25M or >= $8M and percentile >= 0.40; else skip; rewards unconfirmed`, `plan totals: ${usd(costs)} estimated gas; up to $${capital} capital at risk on the two-tranche schedule ($${tranche1} from entry, $${tranche2} from day ${reviewDay} if the review approves it); product fees/losses extra`, `${minutes} minutes total hands-on; ${hold}-day hold`),
   ];
 }
 export function liveRows(snapshot: Snapshot): LiveRow[] {
