@@ -314,38 +314,72 @@ function select(calibration: SnapshotProtocol[], asOf: string) {
     weight: definition.overlay === 'g50m' ? 0.5 : definition.overlay === 'g25m' ? 0.25 : 0,
     enabled: definition.overlay === 'g50m' || definition.overlay === 'g25m', candidates: candidates.map(reported)};
 }
-/** Category actions describe a small position; the snapshot alone cannot establish reward eligibility. */
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+/** Category playbooks are conditional on the official UI; snapshot categories do not prove features or rewards. */
+function actionFor(p: SnapshotProtocol, capital: number, chain: string) {
   const c = (p.category ?? '').toLowerCase();
-  const target = `${p.name} on ${chain}`;
-  if (/lend|cdp|collateral/.test(c)) return `Supply $${capital} of eligible collateral through ${target}; check borrowing terms before borrowing`;
-  if (/curator|vault|allocator/.test(c)) return `Deposit $${capital} into an eligible vault at ${target} and retain its shares`;
-  if (/dex|yield|farm/.test(c)) return `Add $${capital} to a supported liquidity or yield position at ${target}`;
-  if (/bridge/.test(c)) return `Transfer $${capital} through ${target} after checking destination liquidity`;
-  if (/stak|restak/.test(c)) return `Stake $${capital} of a supported asset through ${target} and retain the receipt`;
-  if (/perpetual|derivative/.test(c)) return `Fund a $${capital} margin account at ${target} and test a small hedged position`;
-  if (/prediction/.test(c)) return `Fund ${target} with $${capital} and take a small position in a market you understand`;
-  if (/stable/.test(c)) return `Deposit or mint $${capital} of a supported stable asset through ${target}`;
-  if (/rwa|real world/.test(c)) return `Check access requirements and acquire $${capital} of an eligible asset at ${target}`;
-  if (/insurance/.test(c)) return `Compare exclusions and purchase a small cover policy using a $${capital} budget at ${target}`;
-  return `Use $${capital} in a supported deposit position at ${target} after reading its withdrawal terms`;
+  const play = (entry: string, first: string, second: string, maintain: string, exit: string) => ({
+    entry: `At ${p.name} on ${chain}, ${entry}; cap committed capital at $${capital}`,
+    first, second, maintain, exit,
+  });
+  if (/uncollateralized/.test(c)) return play('supply to an eligible credit pool after checking borrower and default terms', 'review borrower repayments', 'review pool utilization', 'check arrears and redemption gates', 'request redemption within the pool notice window');
+  if (/cdp/.test(c)) return play('deposit eligible collateral; inspect liquidation ratio before any optional mint', 'review collateral headroom', 'review debt and stability fees', 'keep debt below the liquidation threshold; avoid leverage', 'repay any minted debt before withdrawing collateral');
+  if (/lend|collateral/.test(c)) return play('supply an eligible asset after checking caps and withdrawal liquidity; leave borrowing disabled', 'withdraw a small slice', 'resupply that slice', 'check utilization, supply rates and collateral settings', 'withdraw supply; repay any debt first');
+  if (/option/.test(c)) return play('inspect expiry and maximum loss; use only a defined-risk option or vault allocation', 'review expiry and exercise terms', 'review premium and settlement quotes', 'track expiry and any vault lockup', 'settle or close before expiry, then redeem available funds');
+  if (/curator|vault|allocator/.test(c)) return play('deposit into a supported vault after inspecting allocations, fees and redemption queues', 'redeem a small share tranche', 'redeposit the redeemed assets', 'track share value, allocation changes and queue length', 'request share redemption and complete any queued claim');
+  if (/liquidity manager|dex/.test(c)) return play('select a liquid pair, inspect price impact and fee tier, then add a small liquidity position', 'remove a small liquidity slice', 're-add the withdrawn pair', 'check range coverage, pool depth and impermanent loss', 'remove liquidity and collect accrued fees');
+  if (/leveraged farm/.test(c)) return play('choose an unlevered farm position if available; inspect debt and liquidation terms', 'review debt exposure', 'review underlying pool liquidity', 'keep leverage disabled and inspect withdrawal penalties', 'unwind the farm and settle any debt before withdrawal');
+  if (/yield|farm/.test(c)) return play('deposit into a supported yield pool after separating base yield from incentives', 'withdraw a small tranche', 'redeposit the withdrawn tranche', 'check reward expiry, deposit fees and withdrawal locks', 'unstake or redeem the position and collect earned balances');
+  if (/bridge/.test(c)) return play('quote a supported route and verify destination liquidity and recipient before transfer', 'review route fees', 'verify destination receipt and finality', 'track pending transfers and destination liquidity', 'quote a return route separately; destination gas is additional');
+  if (/stak|restak/.test(c)) return play('stake a supported asset after checking slashing and unbonding rules; retain the receipt', 'review receipt exchange rate', 'review validator or operator status', 'monitor slashing exposure and unbonding queues', 'request unstaking and claim after the cooldown');
+  if (/perpetual|derivative|basis trading|synthetic/.test(c)) return play('fund supported collateral; size any test trade within the budget and avoid leverage', 'review funding and basis', 'review close quotes and margin headroom', 'check funding costs, liquidation distance and open orders', 'cancel orders, close exposure and withdraw margin');
+  if (/prediction/.test(c)) return play('inspect resolution rules and buy a small position in a market you understand', 'review resolution evidence', 'review an exit quote', 'check market depth and dispute deadlines', 'sell if liquid or redeem after final resolution');
+  if (/nft|marketplace/.test(c)) return play('verify collection or asset identity, royalties and executable bids before a small purchase', 'review comparable executable bids', 'review listing and royalty terms', 'track liquidity; avoid self-trades and inflated floor prices', 'cancel stale listings; sell only against an acceptable bid');
+  if (/gaming|game/.test(c)) return play('use a supported game asset or entry only after checking ownership and refund rules', 'complete a supported gameplay session', 'use a different supported game mode', 'track asset utility and withdrawal restrictions', 'redeem refundable balances and cancel market listings');
+  if (/oracle/.test(c)) return play('inspect a supported data service; allocate only to documented usage or staking', 'inspect feed freshness', 'compare feed deviation against its reference', 'check heartbeat, service charges and any slash conditions', 'cancel service renewals or follow documented unstaking');
+  if (/privacy/.test(c)) return play('test a supported private deposit after checking withdrawal denominations; back up recovery material offline', 'verify deposit status', 'review withdrawal proof requirements', 'retain recovery material and verify withdrawal availability', 'withdraw using the saved recovery material; never share secrets');
+  if (/wallet|infra|chain/.test(c)) return play('verify network settings and use a documented wallet or network feature with a small funded balance', 'send a small transfer between your own addresses', 'test the return transfer', 'check receipts, network status and token approvals', 'return unused balances and revoke unused approvals');
+  if (/social/.test(c)) return play('set up a profile and use a documented paid feature only if useful', 'publish an original post', 'reply meaningfully to another post', 'review permissions and recurring charges', 'cancel renewals and withdraw any refundable balance');
+  if (/\bai\b|artificial intelligence/.test(c)) return play('test a documented agent or inference service; cap prepaid usage and restrict wallet permissions', 'run a small supported inference task', 'evaluate its output on a second task', 'check usage charges and agent spending permissions', 'disable agent permissions and withdraw refundable credits');
+  if (/stable/.test(c)) return play('inspect backing and redemption fees before acquiring or minting a supported stable asset', 'review the redemption quote', 'review backing and peg data', 'track peg deviation and redemption queues', 'redeem through the documented route; settle any mint debt');
+  if (/rwa|real world/.test(c)) return play('check access requirements, issuer exposure and settlement terms before acquiring an eligible asset', 'review issuer disclosures', 'review redemption availability', 'track settlement windows and issuer restrictions', 'submit redemption before the dealing cutoff');
+  if (/insurance/.test(c)) return play('compare exclusions, coverage dates and claim evidence before buying cover within budget', 'review covered exposure', 'review claims and exclusions', 'check coverage expiry and evidence requirements', 'cancel renewal; claim only for a qualifying loss');
+  if (/payment|card/.test(c)) return play('inspect fees and refund terms before funding a supported payment balance', 'make a small useful payment', 'review settlement and refund status', 'track merchant fees and remaining balance', 'withdraw unused funds and cancel recurring payments');
+  if (/index/.test(c)) return play('inspect constituents, rebalance rules and redemption fees before buying index shares', 'review constituent weights', 'review redemption quotes', 'track concentration and rebalance costs', 'redeem shares through the documented route');
+  return play('verify a documented core feature and withdrawal terms before allocating funds; do not assume deposits exist', 'review the core feature receipt', 'review the documented exit quote', 'check permissions, lockups and exit liquidity', 'follow the documented exit and revoke unused approvals');
 }
+/** Planning estimates in USD per action, not live fee quotes. Keys match snapshot chain names. */
+const FARM_GAS: Record<string, number> = {
+  Ethereum: 8, Arbitrum: 0.50, Base: 0.30, Optimism: 0.50, Unichain: 0.30,
+  Linea: 0.50, Scroll: 0.50, 'zkSync Era': 0.50, 'Polygon zkEVM': 0.50,
+  Mantle: 0.30, Blast: 0.50, Mode: 0.50, Metis: 0.50, Soneium: 0.30,
+  'X Layer': 0.30, Ink: 0.30, Fraxtal: 0.30, Boba: 0.50, Morph: 0.50,
+  MegaETH: 0.30, Solana: 0.05, BSC: 0.20, Binance: 0.20, Polygon: 0.20, POLYGON: 0.20,
+};
 function farmSteps(row: BoardRow, defaultAge: number, categoryReference: boolean): string[] {
   const chain = row.chains[0] ?? 'its primary chain';
   const capital = row.tvl_usd >= 5e9 ? 250 : row.tvl_usd >= 1e9 ? 150 : row.tvl_usd >= 1e8 ? 100 : 50;
   const age = row.age_days ?? defaultAge;
   const hold = age < 180 ? 60 : age < 365 ? 45 : 30;
   const weeks = Math.ceil(hold / 7);
-  const gas = capital >= 150 ? 8 : 4;
-  const costs = 3 + gas + 2 * weeks;
+  const gas = Object.hasOwn(FARM_GAS, chain) ? FARM_GAS[chain]! : 2;
+  const prepGas = gas, entryGas = 2*gas, weeklyGas = 2*gas, exitGas = 3*gas;
+  const costs = prepGas+entryGas+weeklyGas*weeks+exitGas;
+  const prepMinutes = 5, entryMinutes = 15, weeklyMinutes = 10, reviewMinutes = 10, exitMinutes = 15;
+  const minutes = prepMinutes+entryMinutes+weeklyMinutes*weeks+reviewMinutes+exitMinutes;
+  const usd = (n: number) => `$${n.toFixed(2)}`;
+  const play = actionFor(row, capital, chain);
+  const trend = row.change_7d === null ? "7d TVL change is unreported; verify on the protocol's own page" :
+    row.change_7d < 0 ? `7d TVL ${row.change_7d}%; re-check whether TVL keeps falling before adding` :
+    row.change_7d > 0 ? `7d TVL +${row.change_7d}%; momentum supports holding if liquidity remains sound` :
+    '7d TVL is flat; verify liquidity before adding';
   const step = (action: string, cost: string, time: string) => `${action}. Cost: ${cost}. Time: ${time}.`;
   return [
-    step(`Prepare a dedicated wallet for ${row.name} and fund gas on ${chain}`, 'about $3 gas plus the position budget', '5 minutes'),
-    step(actionFor(row, capital, chain), `$${capital} committed capital and about $${gas} gas`, '15 minutes'),
-    step(`Review ${row.name}'s activity requirements and perform one supported action on ${chain} each week`, 'budget $2 gas weekly', `10 minutes weekly for ${weeks} weeks`),
-    step(`Maintain the ${row.name} position and monitor withdrawal liquidity`, `$${capital} at risk, with variable opportunity cost`, `${hold} days`),
-    step(`Check ${row.name}'s official rewards terms, log transactions and plan an orderly withdrawal`, 'no fee to read terms; withdrawal gas varies', '10 minutes'),
-    step(`Net verdict: ${row.verdict.toUpperCase()} — implied $${row.implied_value_usd}; ${row.verdict_basis.ratio.toFixed(2)}x TVL; category median ${row.verdict_basis.category_median_ratio.toFixed(2)}x; percentile ${row.verdict_basis.ratio_percentile.toFixed(2)} among ${row.verdict_basis.reference_n} ${categoryReference ? (row.category ?? 'Uncategorized') : 'whole-board'} board peers${categoryReference ? '' : ' (category under 5)'}; farm: >= $25M and percentile >= 0.75; thin: >= $25M or >= $8M and percentile >= 0.40; else skip; rewards unconfirmed`, `roughly $${costs}, excluding capital losses`, `${weeks} weeks`),
+    step(`Prepare a dedicated wallet for ${row.name}; verify its official app and ${chain} network. Fund ${usd(costs)} in native gas for the whole plan at an estimated ${usd(gas)}/action; this reserve includes later steps`, `${usd(prepGas)} gas for 1 funding action; reserve is not an extra fee`, `${prepMinutes} minutes`),
+    step(`${play.entry}. Confirm these category features in the official UI before signing; limit approvals to the amount used`, `$${capital} committed capital + ${usd(entryGas)} gas allowance for 2 entry/approval actions; product fees extra`, `${entryMinutes} minutes`),
+    step(`For ${row.name}, alternate weekly: odd weeks ${play.first}; even weeks ${play.second}. Use only UI-supported actions, recycle existing capital and skip unavailable features; read-only checks need no gas`, `up to ${usd(weeklyGas)} gas/week for 2 actions (${usd(weeklyGas*weeks)} across ${weeks} weeks); no new capital`, `${weeklyMinutes} minutes/week for ${weeks} weeks within ${hold} days`),
+    step(`Maintain ${row.name}: ${play.maintain}. At day ${Math.floor(hold/2)} of the ${hold}-day hold, ${trend}`, `$${capital} remains at risk; $0 gas for review; opportunity cost varies`, `${reviewMinutes} minutes hands-on; ${hold} days elapsed hold`),
+    step(`Rewards unconfirmed: check ${row.name}'s official eligibility, chain and cutoff terms; never assume an airdrop. Save tx hashes, dates, amounts and fees. At exit, ${play.exit}; record final proceeds`, `${usd(exitGas)} gas allowance for 3 exit/claim/revoke actions; reading terms is free; product fees extra`, `${exitMinutes} minutes hands-on; queues may extend settlement`),
+    step(`Net verdict: ${row.verdict.toUpperCase()} — implied $${row.implied_value_usd}; ${row.verdict_basis.ratio.toFixed(2)}x TVL; category median ${row.verdict_basis.category_median_ratio.toFixed(2)}x; percentile ${row.verdict_basis.ratio_percentile.toFixed(2)} among ${row.verdict_basis.reference_n} ${categoryReference ? (row.category ?? 'Uncategorized') : 'whole-board'} board peers${categoryReference ? '' : ' (category under 5)'}; farm: >= $25M and percentile >= 0.75; thin: >= $25M or >= $8M and percentile >= 0.40; else skip; rewards unconfirmed`, `plan totals: ${usd(costs)} estimated gas; $${capital} capital at risk; product fees/losses extra`, `${minutes} minutes total hands-on; ${hold}-day hold`),
   ];
 }
 export function liveRows(snapshot: Snapshot): LiveRow[] {
