@@ -347,6 +347,34 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string) {
   if (/index/.test(c)) return play('inspect constituents, rebalance rules and redemption fees before buying index shares', 'review constituent weights', 'review redemption quotes', 'track concentration and rebalance costs', 'redeem shares through the documented route');
   return play('verify a documented core feature and withdrawal terms before allocating funds; do not assume deposits exist', 'review the core feature receipt', 'review the documented exit quote', 'check permissions, lockups and exit liquidity', 'follow the documented exit and revoke unused approvals');
 }
+function riskFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (/uncollateralized/.test(c)) return 'borrower default can impair the pool; arrears are the early warning';
+  if (/cdp/.test(c)) return 'collateral drawdowns shrink liquidation headroom fast';
+  if (/lend|collateral/.test(c)) return 'utilization spikes can freeze withdrawals exactly when you want out';
+  if (/option/.test(c)) return 'premiums paid are sunk; the position can expire worthless';
+  if (/curator|vault|allocator/.test(c)) return 'curator reallocations can shift the exposure without notice';
+  if (/liquidity manager|dex/.test(c)) return 'impermanent loss can outrun fees in a one-sided move';
+  if (/leveraged farm/.test(c)) return 'debt keeps accruing while rewards fall; liquidation is final';
+  if (/yield|farm/.test(c)) return 'incentive rewards can be cut or end before the hold does';
+  if (/bridge/.test(c)) return 'a bridge exploit is the tail risk; never leave funds parked mid-route';
+  if (/stak|restak/.test(c)) return 'slashing and a long unbonding queue can trap capital past the plan';
+  if (/perpetual|derivative|basis trading|synthetic/.test(c)) return 'funding flips and margin calls can force an early close';
+  if (/prediction/.test(c)) return 'a resolution dispute can lock funds past the event date';
+  if (/nft|marketplace/.test(c)) return 'bids can vanish; a floor price is not exit liquidity';
+  if (/gaming|game/.test(c)) return "asset utility and withdrawals depend on the game's operator";
+  if (/oracle/.test(c)) return 'a stalled feed can pause the service and anything staked on it';
+  if (/privacy/.test(c)) return 'lost recovery material means lost funds; there is no reset';
+  if (/wallet|infra|chain/.test(c)) return 'stale token approvals are the main leftover attack surface';
+  if (/social/.test(c)) return 'paid features renew quietly; small charges are the slow leak';
+  if (/\bai\b|artificial intelligence/.test(c)) return 'agent permissions can overspend if the caps lapse';
+  if (/stable/.test(c)) return 'in a depeg, exit liquidity thins exactly when the peg slips';
+  if (/rwa|real world/.test(c)) return 'issuer or settlement failure sits outside onchain control';
+  if (/insurance/.test(c)) return 'a denied claim leaves the premium spent and the loss whole';
+  if (/payment|card/.test(c)) return 'a settlement failure can strand small balances with the merchant';
+  if (/index/.test(c)) return 'rebalances realize costs whether or not the index performs';
+  return 'smart-contract failure can impair the whole position at once';
+}
 /** Planning estimates in USD per action, not live fee quotes. Keys match snapshot chain names. */
 const FARM_GAS: Record<string, number> = {
   Ethereum: 8, Arbitrum: 0.50, Base: 0.30, Optimism: 0.50, Unichain: 0.30,
@@ -380,8 +408,8 @@ function farmSteps(row: BoardRow, defaultAge: number, categoryReference: boolean
     step(`Prepare a dedicated wallet for ${row.name}; verify its official app and ${chain} network. Fund ${usd(costs)} in native gas for the whole plan at an estimated ${usd(gas)}/action; this reserve includes later steps`, `${usd(prepGas)} gas for 1 funding action; reserve is not an extra fee`, `${prepMinutes} minutes`),
     step(`${play.entry}. Confirm these category features in the official UI before signing; limit approvals to the amount used. Deploy on a two-tranche schedule: $${tranche1} at entry, the remaining $${tranche2} held back for the day-${reviewDay} review`, `$${tranche1} committed now (tranche 1 of 2; $${tranche2} held back for the day-${reviewDay} review) + ${usd(entryGas)} gas allowance for 2 entry/approval actions; product fees extra`, `${entryMinutes} minutes`),
     step(`For ${row.name}, alternate weekly: odd weeks ${play.first}; even weeks ${play.second}. Use only UI-supported actions, recycle existing capital and skip unavailable features; read-only checks need no gas`, `up to ${usd(weeklyGas)} gas/week for 2 actions (${usd(weeklyGas*weeks)} across ${weeks} weeks); no new capital`, `${weeklyMinutes} minutes/week for ${weeks} weeks within ${hold} days`),
-    step(`Maintain ${row.name}: ${play.maintain}. At day ${reviewDay} of the ${hold}-day hold, ${trend}. Capital schedule decision: add the held-back $${tranche2} only if the TVL and liquidity checks above pass; otherwise run out the plan on the $${tranche1} already committed`, `$${tranche1} at risk before this review ($${capital} once tranche 2 is added); $0 gas for review; opportunity cost varies`, `${reviewMinutes} minutes hands-on; ${hold} days elapsed hold`),
-    step(`Rewards unconfirmed: check ${row.name}'s official eligibility, chain and cutoff terms; never assume an airdrop. Save tx hashes, dates, amounts and fees. At exit, ${play.exit}; record final proceeds`, `${usd(exitGas)} gas allowance for 3 exit/claim/revoke actions; reading terms is free; product fees extra`, `${exitMinutes} minutes hands-on; queues may extend settlement`),
+    step(`Maintain ${row.name}: ${play.maintain}. Key risk: ${riskFor(row)}. At day ${reviewDay} of the ${hold}-day hold, ${trend}. Capital schedule decision: add the held-back $${tranche2} only if those checks pass; otherwise run out the plan on the $${tranche1} already committed`, `$${tranche1} at risk before this review ($${capital} once tranche 2 is added); $0 gas for review; opportunity cost varies`, `${reviewMinutes} minutes hands-on; ${hold} days elapsed hold`),
+    step(`Rewards unconfirmed: check ${row.name}'s official eligibility, chain and cutoff terms; never assume an airdrop. Save tx hashes, dates, amounts and fees. Exit early if TVL drops 30%+ from entry or two weekly checks fail in a row. At exit, ${play.exit}; record final proceeds`, `${usd(exitGas)} gas allowance for 3 exit/claim/revoke actions; reading terms is free; product fees extra`, `${exitMinutes} minutes hands-on; queues may extend settlement`),
     step(`Net verdict: ${row.verdict.toUpperCase()} — implied $${row.implied_value_usd}; ${row.verdict_basis.ratio.toFixed(2)}x TVL; category median ${row.verdict_basis.category_median_ratio.toFixed(2)}x; percentile ${row.verdict_basis.ratio_percentile.toFixed(2)} among ${row.verdict_basis.reference_n} ${categoryReference ? (row.category ?? 'Uncategorized') : 'whole-board'} board peers${categoryReference ? '' : ' (category under 5)'}; farm: >= $25M and percentile >= 0.75; thin: >= $25M or >= $8M and percentile >= 0.40; else skip; rewards unconfirmed`, `plan totals: ${usd(costs)} estimated gas; up to $${capital} capital at risk on the two-tranche schedule ($${tranche1} from entry, $${tranche2} from day ${reviewDay} if the review approves it); product fees/losses extra`, `${minutes} minutes total hands-on; ${hold}-day hold`),
   ];
 }
